@@ -1,0 +1,17 @@
+{
+  "name": "smarty-pro-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "groq-sdk": "^0.7.0",
+    "@google/generative-ai": "^0.15.0",
+    "mathjs": "^11.11.0",
+    "uuid": "^9.0.1"
+  }
+}
