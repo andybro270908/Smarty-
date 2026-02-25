@@ -14,107 +14,69 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const sessions = {};
 
-/* ===========================
-   Health Check
-=========================== */
-
 app.get("/", (req, res) => {
-  res.send("SMARTY PRO Running (Groq + Gemini + Math Engine)");
+  res.send("SMARTY PRO v2 Running");
 });
-
-/* ===========================
-   Utility: Detect Math
-=========================== */
 
 function isMathExpression(text) {
   return /^[0-9+\-*/().\s^%]+$/.test(text);
 }
 
-/* ===========================
-   Chat Route
-=========================== */
-
 app.post("/chat", async (req, res) => {
   try {
     const { message, sessionId } = req.body;
-
-    if (!message) {
-      return res.status(400).json({ error: "Message required" });
-    }
+    if (!message) return res.status(400).json({ error: "Message required" });
 
     const id = sessionId || uuidv4();
-
-    if (!sessions[id]) {
-      sessions[id] = [];
-    }
-
-    /* ===========================
-       1️⃣ Math Engine (Deterministic)
-    ============================ */
+    if (!sessions[id]) sessions[id] = [];
 
     if (isMathExpression(message)) {
       try {
         const result = evaluate(message);
         return res.json({
           reply: `Answer: ${result}`,
-          provider: "math-engine",
+          provider: "math",
           sessionId: id
         });
-      } catch (err) {
+      } catch {
         return res.json({
           reply: "Invalid mathematical expression.",
-          provider: "math-engine",
+          provider: "math",
           sessionId: id
         });
       }
     }
-
-    /* ===========================
-       Add To Memory
-    ============================ */
 
     sessions[id].push({ role: "user", content: message });
 
     const systemPrompt = {
       role: "system",
       content:
-        "You are SMARTY AI. Provide precise, factual, and structured answers. If unsure, clearly say you are uncertain. Avoid guessing."
+        "You are SMARTY AI. Give short, precise, and factual answers. Maximum 4 sentences. No unnecessary explanations."
     };
 
     let reply = null;
     let providerUsed = null;
 
-    /* ===========================
-       2️⃣ Try GROQ First
-    ============================ */
-
     try {
-      if (process.env.GROQ_API_KEY) {
-        const completion = await groq.chat.completions.create({
-          model: "llama-3.1-8b-instant",
-          temperature: 0.2,
-          messages: [systemPrompt, ...sessions[id]]
-        });
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.1-8b-instant",
+        temperature: 0.1,
+        max_tokens: 400,
+        messages: [systemPrompt, ...sessions[id]]
+      });
 
-        reply = completion.choices[0].message.content;
-        providerUsed = "groq";
-      }
-    } catch (err) {
-      console.log("Groq failed → Gemini fallback");
-    }
+      reply = completion.choices[0].message.content;
+      providerUsed = "groq";
+    } catch {}
 
-    /* ===========================
-       3️⃣ Gemini Fallback
-    ============================ */
-
-    if (!reply && process.env.GEMINI_API_KEY) {
+    if (!reply) {
       try {
         const model = genAI.getGenerativeModel({
           model: "gemini-1.5-flash",
           generationConfig: {
-            temperature: 0.2,
-            topP: 0.8,
-            maxOutputTokens: 1024
+            temperature: 0.1,
+            maxOutputTokens: 400
           }
         });
 
@@ -124,26 +86,18 @@ app.post("/chat", async (req, res) => {
 
         reply = result.response.text();
         providerUsed = "gemini";
-      } catch (err) {
-        console.log("Gemini failed");
-      }
+      } catch {}
     }
 
-    if (!reply) {
-      return res.status(500).json({ error: "All AI providers failed." });
-    }
+    if (!reply)
+      return res.status(500).json({ error: "All providers failed" });
 
     sessions[id].push({ role: "assistant", content: reply });
 
-    res.json({
-      reply,
-      provider: providerUsed,
-      sessionId: id
-    });
+    res.json({ reply, provider: providerUsed, sessionId: id });
 
-  } catch (error) {
-    console.error("SMARTY PRO Error:", error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
