@@ -1,6 +1,6 @@
 {
-  "name": "smarty-pro-backend",
-  "version": "1.0.0",
+  "name": "smarty-pro",
+  "version": "2.0.0",
   "type": "module",
   "main": "index.js",
   "scripts": {
