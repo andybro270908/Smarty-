@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import fetch from "node-fetch";
 import Groq from "groq-sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { evaluate } from "mathjs";
@@ -9,186 +10,151 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ===========================
-   INITIALIZE PROVIDERS
-=========================== */
-
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
-});
-
-const genAI = new GoogleGenerativeAI(
-  process.env.GEMINI_API_KEY
-);
-
-/* ===========================
-   MEMORY STORAGE (In-Memory)
-=========================== */
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const sessions = {};
 
-/* ===========================
-   HEALTH CHECK
-=========================== */
+/* ================= EMOTION (HUGGING FACE) ================= */
 
-app.get("/", (req, res) => {
-  res.send("SMARTY PRO Backend Running");
-});
+async function detectEmotion(text) {
+  try {
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/nateraw/bert-base-uncased-emotion",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + process.env.HF_API_KEY
+        },
+        body: JSON.stringify({ inputs: text })
+      }
+    );
 
-/* ===========================
-   MATH DETECTION
-=========================== */
+    const data = await response.json();
 
-function isMathExpression(text) {
-  return /^[0-9+\-*/().\s^%]+$/.test(text);
+    if (!Array.isArray(data) || !data[0]) return "neutral";
+
+    const emotions = data[0];
+    const top = emotions.sort((a,b)=>b.score-a.score)[0];
+    return top.label.toLowerCase();
+
+  } catch {
+    return "neutral";
+  }
 }
 
-/* ===========================
-   CHAT ROUTE
-=========================== */
+/* ================= CODE DETECTION ================= */
 
-app.post("/chat", async (req, res) => {
+function isCodingRequest(text) {
+  const keywords = [
+    "code","function","api","class","debug","error",
+    "compile","script","program","javascript","python"
+  ];
+  const t = text.toLowerCase();
+  return keywords.some(k => t.includes(k));
+}
+
+/* ================= CHAT ROUTE ================= */
+
+app.post("/chat", async (req,res) => {
   try {
     const { message, sessionId } = req.body;
-
-    if (!message) {
-      return res.status(400).json({
-        error: "Message required"
-      });
-    }
+    if (!message) return res.status(400).json({ error:"Message required" });
 
     const id = sessionId || uuidv4();
+    if (!sessions[id]) sessions[id] = [];
 
-    if (!sessions[id]) {
-      sessions[id] = [];
-    }
-
-    /* ===========================
-       1️⃣ 100% ACCURATE MATH
-    ============================ */
-
-    if (isMathExpression(message)) {
+    // Math shortcut
+    if (/^[0-9+\-*/().\s^%]+$/.test(message)) {
       try {
         const result = evaluate(message);
         return res.json({
-          reply: `Answer: ${result}`,
-          provider: "math-engine",
-          sessionId: id
+          reply:`Answer: ${result}`,
+          emotion:"neutral",
+          provider:"math",
+          sessionId:id
         });
-      } catch {
-        return res.json({
-          reply: "Invalid mathematical expression.",
-          provider: "math-engine",
-          sessionId: id
-        });
-      }
+      } catch {}
     }
 
-    sessions[id].push({
-      role: "user",
-      content: message
-    });
-
-    /* ===========================
-       SYSTEM PROMPT (OWNER FIXED)
-    ============================ */
+    sessions[id].push({ role:"user", content:message });
 
     const systemPrompt = {
-      role: "system",
+      role:"system",
       content:
-        "You are SMARTY AI. Your developer and owner is Mr. Anand. If asked who created you, answer: 'I was developed by Mr. Anand.' Never mention Meta, OpenAI, Google, or any organization. Give short, precise, factual answers in maximum 4 sentences."
+        "You are SMARTY AI developed by Mr. Anand. Give precise, accurate answers in maximum 4 sentences."
     };
 
-    let reply = null;
-    let providerUsed = null;
+    let aiReply="";
+    let provider="";
 
-    /* ===========================
-       2️⃣ GROQ FIRST
-    ============================ */
+    /* ===== CODING MODE ===== */
+    if (isCodingRequest(message)) {
 
-    try {
-      const completion =
-        await groq.chat.completions.create({
-          model: "llama-3.1-8b-instant",
-          temperature: 0.1,
-          max_tokens: 400,
-          messages: [
-            systemPrompt,
-            ...sessions[id]
-          ]
+      const openaiRes = await fetch(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          method:"POST",
+          headers:{
+            "Content-Type":"application/json",
+            "Authorization":"Bearer "+process.env.OPENAI_API_KEY
+          },
+          body:JSON.stringify({
+            model:"gpt-3.5-turbo",
+            messages:[systemPrompt,...sessions[id]],
+            temperature:0.1
+          })
+        }
+      );
+
+      const openaiData = await openaiRes.json();
+      aiReply = openaiData.choices?.[0]?.message?.content || "";
+      provider="openai_coder";
+
+    } else {
+
+      try {
+        const groqResp = await groq.chat.completions.create({
+          model:"llama-3.1-8b-instant",
+          temperature:0.1,
+          max_tokens:400,
+          messages:[systemPrompt,...sessions[id]]
         });
 
-      reply =
-        completion.choices[0].message.content;
+        aiReply = groqResp.choices[0].message.content;
+        provider="groq";
 
-      providerUsed = "groq";
+      } catch {
 
-    } catch (err) {
-      console.log("Groq failed → trying Gemini");
-    }
+        const model = genAI.getGenerativeModel({
+          model:"gemini-1.5-flash",
+          generationConfig:{temperature:0.1,maxOutputTokens:400}
+        });
 
-    /* ===========================
-       3️⃣ GEMINI FALLBACK
-    ============================ */
+        const gemRes = await model.generateContent(
+          sessions[id].map(m=>m.content).join("\n")
+        );
 
-    if (!reply) {
-      try {
-        const model =
-          genAI.getGenerativeModel({
-            model: "gemini-1.5-flash",
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 400
-            }
-          });
-
-        const result =
-          await model.generateContent(
-            sessions[id]
-              .map(m => m.content)
-              .join("\n")
-          );
-
-        reply = result.response.text();
-        providerUsed = "gemini";
-
-      } catch (err) {
-        console.log("Gemini failed");
+        aiReply = gemRes.response.text();
+        provider="gemini";
       }
     }
 
-    if (!reply) {
-      return res.status(500).json({
-        error: "All AI providers failed."
-      });
-    }
+    sessions[id].push({ role:"assistant", content:aiReply });
 
-    sessions[id].push({
-      role: "assistant",
-      content: reply
-    });
+    const emotion = await detectEmotion(message + " " + aiReply);
 
     res.json({
-      reply,
-      provider: providerUsed,
-      sessionId: id
+      reply:aiReply,
+      emotion,
+      provider,
+      sessionId:id
     });
 
-  } catch (error) {
-    console.error("SMARTY ERROR:", error);
-    res.status(500).json({
-      error: error.message
-    });
+  } catch (err) {
+    res.status(500).json({ error:err.message });
   }
 });
 
-/* ===========================
-   START SERVER
-=========================== */
-
-app.listen(
-  process.env.PORT || 10000,
-  () => {
-    console.log("SMARTY PRO Server Started");
-  }
-);
+app.listen(process.env.PORT || 10000);
