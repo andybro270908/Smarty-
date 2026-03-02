@@ -3,8 +3,6 @@ import cors from "cors";
 import mongoose from "mongoose";
 import fetch from "node-fetch";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import { v4 as uuidv4 } from "uuid";
 
 const app = express();
 app.use(cors());
@@ -39,16 +37,21 @@ const Summary = mongoose.model("Summary", SummarySchema);
 /* ================= AUTH ================= */
 
 app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-  const hashed = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 10);
 
-  const user = await User.create({
-    username,
-    password: hashed
-  });
+    const user = await User.create({
+      username,
+      password: hashed
+    });
 
-  res.json({ userId: user._id });
+    res.json({ userId: user._id });
+
+  } catch (err) {
+    res.status(400).json({ error: "Username may already exist." });
+  }
 });
 
 app.post("/login", async (req, res) => {
@@ -98,14 +101,11 @@ async function summarizeMemory(userId) {
     .find({ userId })
     .sort({ timestamp: 1 });
 
+  if (messages.length === 0) return;
+
   const text = messages
     .map(m => `${m.role}: ${m.content}`)
     .join("\n");
-
-  const summaryPrompt = `
-  Summarize this conversation while preserving important facts,
-  user preferences, goals, and context.
-  `;
 
   const openaiRes = await fetch(
     "https://api.openai.com/v1/chat/completions",
@@ -118,7 +118,11 @@ async function summarizeMemory(userId) {
       body: JSON.stringify({
         model: "gpt-3.5-turbo",
         messages: [
-          { role: "system", content: summaryPrompt },
+          {
+            role: "system",
+            content:
+              "Summarize this conversation while preserving important user facts, goals, preferences and context."
+          },
           { role: "user", content: text }
         ],
         temperature: 0.2
@@ -142,8 +146,8 @@ async function summarizeMemory(userId) {
 
 function isCodingRequest(text) {
   const keywords = [
-    "code","function","api","debug","class","error",
-    "javascript","python","program"
+    "code","function","api","debug","class",
+    "error","javascript","python","program"
   ];
   return keywords.some(k =>
     text.toLowerCase().includes(k)
@@ -179,13 +183,15 @@ app.post("/chat", async (req, res) => {
       role: "system",
       content: `
       You are SMARTY AI developed by Mr. Anand.
-      Previous memory summary:
+      Previous summarized memory:
       ${summaryDoc ? summaryDoc.summary : "No summary yet."}
       `
     };
 
     let aiReply = "";
+    let provider = "";
 
+    /* ===== CODING → OPENAI ===== */
     if (isCodingRequest(message)) {
 
       const openaiRes = await fetch(
@@ -206,27 +212,59 @@ app.post("/chat", async (req, res) => {
 
       const data = await openaiRes.json();
       aiReply = data.choices[0].message.content;
+      provider = "openai";
 
     } else {
 
-      const openaiRes = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + process.env.OPENAI_API_KEY
-          },
-          body: JSON.stringify({
-            model: "gpt-3.5-turbo",
-            messages: [systemPrompt, ...formattedRecent],
-            temperature: 0.2
-          })
-        }
-      );
+      /* ===== NORMAL CHAT → GROQ ===== */
+      try {
 
-      const data = await openaiRes.json();
-      aiReply = data.choices[0].message.content;
+        const groqRes = await fetch(
+          "https://api.groq.com/openai/v1/chat/completions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + process.env.GROQ_API_KEY
+            },
+            body: JSON.stringify({
+              model: "llama-3.1-8b-instant",
+              messages: [systemPrompt, ...formattedRecent],
+              temperature: 0.2
+            })
+          }
+        );
+
+        const groqData = await groqRes.json();
+        aiReply = groqData.choices[0].message.content;
+        provider = "groq";
+
+      } catch {
+
+        /* ===== FALLBACK → GEMINI ===== */
+
+        const geminiRes = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + process.env.GEMINI_API_KEY,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [{
+                  text: `
+                  ${systemPrompt.content}
+                  ${formattedRecent.map(m=>m.content).join("\n")}
+                  `
+                }]
+              }]
+            })
+          }
+        );
+
+        const geminiData = await geminiRes.json();
+        aiReply = geminiData.candidates[0].content.parts[0].text;
+        provider = "gemini";
+      }
     }
 
     await Message.create({
@@ -244,7 +282,8 @@ app.post("/chat", async (req, res) => {
 
     res.json({
       reply: aiReply,
-      emotion
+      emotion,
+      provider
     });
 
   } catch (err) {
