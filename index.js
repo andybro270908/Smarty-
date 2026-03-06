@@ -8,238 +8,260 @@ const app = express();
 
 app.use(express.json());
 
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST"],
-  })
-);
+app.use(cors({
+  origin: "*",
+  methods: ["GET","POST"]
+}));
 
 const PORT = process.env.PORT || 3000;
 
-/* ------------------ MONGODB CONNECTION ------------------ */
+/* -------------------- MONGODB -------------------- */
 
 const uri = process.env.MONGO_URI;
 
-let db;
+let db = null;
 
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+const client = new MongoClient(uri,{
+  serverApi:{
+    version:ServerApiVersion.v1,
+    strict:true,
+    deprecationErrors:true
+  }
 });
 
-async function connectDB() {
-  try {
+async function connectDB(){
+
+  try{
+
     await client.connect();
 
     db = client.db("smarty");
 
-    console.log("MongoDB connected successfully");
-  } catch (error) {
-    console.log("MongoDB connection error:", error);
+    console.log("MongoDB connected");
+
+  }catch(err){
+
+    console.log("MongoDB connection error:",err);
+
   }
+
 }
 
-connectDB();
+await connectDB();
 
-/* ------------------ REGISTER ------------------ */
+/* -------------------- REGISTER -------------------- */
 
-app.post("/register", async (req, res) => {
-  try {
-    const { username, password } = req.body;
+app.post("/register", async(req,res)=>{
 
-    const existing = await db.collection("users").findOne({ username });
+try{
 
-    if (existing) {
-      return res.json({
-        status: "user already exists",
-      });
-    }
+if(!db){
+return res.json({status:"database not ready"});
+}
 
-    const hash = await bcrypt.hash(password, 10);
+const {username,password}=req.body;
 
-    await db.collection("users").insertOne({
-      username: username,
-      password: hash,
-      created: new Date(),
-    });
+const exist = await db.collection("users").findOne({username});
 
-    res.json({
-      status: "registered",
-    });
-  } catch (error) {
-    res.json({
-      status: "error",
-    });
-  }
+if(exist){
+return res.json({status:"user exists"});
+}
+
+const hash = await bcrypt.hash(password,10);
+
+await db.collection("users").insertOne({
+
+username:username,
+password:hash,
+created:new Date()
+
 });
 
-/* ------------------ LOGIN ------------------ */
+res.json({status:"registered"});
 
-app.post("/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
+}catch(err){
 
-    const user = await db.collection("users").findOne({ username });
+console.log(err);
 
-    if (!user) {
-      return res.json({
-        status: "user not found",
-      });
-    }
+res.json({status:"error"});
 
-    const ok = await bcrypt.compare(password, user.password);
+}
 
-    if (!ok) {
-      return res.json({
-        status: "wrong password",
-      });
-    }
-
-    res.json({
-      status: "success",
-    });
-  } catch (error) {
-    res.json({
-      status: "error",
-    });
-  }
 });
 
-/* ------------------ AI CHAT ------------------ */
+/* -------------------- LOGIN -------------------- */
 
-app.post("/chat", async (req, res) => {
-  try {
-    const message = req.body.message;
+app.post("/login", async(req,res)=>{
 
-    let reply = "I could not generate response.";
+try{
 
-    /* ---------- GEMINI ---------- */
+if(!db){
+return res.json({status:"database not ready"});
+}
 
-    try {
-      if (process.env.GEMINI_API_KEY) {
-        const gemini = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  parts: [{ text: message }],
-                },
-              ],
-            }),
-          }
-        );
+const {username,password}=req.body;
 
-        const data = await gemini.json();
+const user = await db.collection("users").findOne({username});
 
-        reply =
-          data.candidates?.[0]?.content?.parts?.[0]?.text ||
-          reply;
-      }
-    } catch (e) {}
+if(!user){
+return res.json({status:"user not found"});
+}
 
-    /* ---------- GROQ ---------- */
+const ok = await bcrypt.compare(password,user.password);
 
-    try {
-      if (
-        reply === "I could not generate response." &&
-        process.env.GROQ_API_KEY
-      ) {
-        const groq = await fetch(
-          "https://api.groq.com/openai/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "llama3-70b-8192",
-              messages: [
-                {
-                  role: "user",
-                  content: message,
-                },
-              ],
-            }),
-          }
-        );
+if(!ok){
+return res.json({status:"wrong password"});
+}
 
-        const data = await groq.json();
+res.json({status:"success"});
 
-        reply = data.choices?.[0]?.message?.content || reply;
-      }
-    } catch (e) {}
+}catch(err){
 
-    /* ---------- OPENAI ---------- */
+console.log(err);
 
-    try {
-      if (
-        reply === "I could not generate response." &&
-        process.env.OPENAI_API_KEY
-      ) {
-        const openai = await fetch(
-          "https://api.openai.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "user",
-                  content: message,
-                },
-              ],
-            }),
-          }
-        );
+res.json({status:"error"});
 
-        const data = await openai.json();
+}
 
-        reply = data.choices?.[0]?.message?.content || reply;
-      }
-    } catch (e) {}
-
-    /* ---------- SAVE CHAT MEMORY ---------- */
-
-    try {
-      await db.collection("chat").insertOne({
-        user: message,
-        ai: reply,
-        time: new Date(),
-      });
-    } catch {}
-
-    res.json({
-      reply: reply,
-    });
-  } catch (error) {
-    res.json({
-      reply: "Server error occurred.",
-    });
-  }
 });
 
-/* ------------------ SERVER TEST ------------------ */
+/* -------------------- CHAT -------------------- */
 
-app.get("/", (req, res) => {
-  res.send("Smarty AI backend running");
+app.post("/chat", async(req,res)=>{
+
+try{
+
+const message=req.body.message;
+
+let reply="I could not generate response.";
+
+/* GEMINI */
+
+try{
+
+if(process.env.GEMINI_API_KEY){
+
+const r = await fetch(
+`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+{
+method:"POST",
+headers:{
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+contents:[{parts:[{text:message}]}]
+})
+}
+);
+
+const data = await r.json();
+
+reply = data.candidates?.[0]?.content?.parts?.[0]?.text || reply;
+
+}
+
+}catch(e){}
+
+/* GROQ */
+
+try{
+
+if(reply==="I could not generate response." && process.env.GROQ_API_KEY){
+
+const r = await fetch(
+"https://api.groq.com/openai/v1/chat/completions",
+{
+method:"POST",
+headers:{
+Authorization:`Bearer ${process.env.GROQ_API_KEY}`,
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+model:"llama3-70b-8192",
+messages:[{role:"user",content:message}]
+})
+}
+);
+
+const data = await r.json();
+
+reply = data.choices?.[0]?.message?.content || reply;
+
+}
+
+}catch(e){}
+
+/* OPENAI */
+
+try{
+
+if(reply==="I could not generate response." && process.env.OPENAI_API_KEY){
+
+const r = await fetch(
+"https://api.openai.com/v1/chat/completions",
+{
+method:"POST",
+headers:{
+Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+model:"gpt-4o-mini",
+messages:[{role:"user",content:message}]
+})
+}
+);
+
+const data = await r.json();
+
+reply = data.choices?.[0]?.message?.content || reply;
+
+}
+
+}catch(e){}
+
+/* SAVE CHAT */
+
+try{
+
+if(db){
+
+await db.collection("chat").insertOne({
+
+user:message,
+ai:reply,
+time:new Date()
+
 });
 
-/* ------------------ START SERVER ------------------ */
+}
 
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+}catch(e){}
+
+res.json({reply:reply});
+
+}catch(err){
+
+console.log(err);
+
+res.json({reply:"Server error occurred."});
+
+}
+
+});
+
+/* -------------------- TEST ROUTE -------------------- */
+
+app.get("/",(req,res)=>{
+
+res.send("Smarty backend running");
+
+});
+
+/* -------------------- START SERVER -------------------- */
+
+app.listen(PORT,()=>{
+
+console.log("Server running on port "+PORT);
+
 });
