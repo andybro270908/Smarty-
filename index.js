@@ -1,194 +1,279 @@
 import express from "express";
 import cors from "cors";
-import mongoose from "mongoose";
 import fetch from "node-fetch";
-import dotenv from "dotenv";
-
-dotenv.config();
+import { MongoClient } from "mongodb";
+import bcrypt from "bcrypt";
 
 const app = express();
-app.use(cors());
+
 app.use(express.json());
+app.use(cors({ origin: "*" }));
 
-/* ===== MongoDB ===== */
+const PORT = process.env.PORT || 3000;
 
-mongoose.connect(process.env.MONGO_URI)
-.then(()=>console.log("MongoDB connected"))
-.catch(err=>console.log(err));
+const mongoURI = process.env.MONGO_URI;
 
-const User = mongoose.model("User", new mongoose.Schema({
-  username:String,
-  password:String
-}));
+let db;
 
-const Memory = mongoose.model("Memory", new mongoose.Schema({
-  username:String,
-  message:String,
-  reply:String,
-  time:{type:Date,default:Date.now}
-}));
+async function connectDB(){
 
-/* ===== Register ===== */
+const client = new MongoClient(mongoURI);
+
+await client.connect();
+
+db = client.db("smarty");
+
+console.log("MongoDB connected");
+
+}
+
+connectDB();
+
+
+
+/* REGISTER */
 
 app.post("/register", async(req,res)=>{
-  const {username,password}=req.body;
 
-  const exist=await User.findOne({username});
-  if(exist) return res.json({status:"user_exists"});
+try{
 
-  await User.create({username,password});
-  res.json({status:"registered"});
+const {username,password}=req.body;
+
+const hash = await bcrypt.hash(password,10);
+
+await db.collection("users").insertOne({
+
+username,
+password:hash
+
 });
 
-/* ===== Login ===== */
+res.json({status:"registered"});
+
+}catch(err){
+
+res.json({status:"error"});
+
+}
+
+});
+
+
+
+/* LOGIN */
 
 app.post("/login", async(req,res)=>{
-  const {username,password}=req.body;
-
-  const user=await User.findOne({username,password});
-  if(!user) return res.json({status:"invalid"});
-
-  res.json({status:"success"});
-});
-
-/* ===== Emotion Detection ===== */
-
-async function detectEmotion(text){
-
-  try{
-
-  const r=await fetch(
-  "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base",
-  {
-    method:"POST",
-    headers:{
-      Authorization:`Bearer ${process.env.HF_API_KEY}`,
-      "Content-Type":"application/json"
-    },
-    body:JSON.stringify({inputs:text})
-  });
-
-  const data=await r.json();
-
-  return data?.[0]?.[0]?.label || "neutral";
-
-  }catch(e){
-    return "neutral";
-  }
-
-}
-
-/* ===== AI Router ===== */
-
-async function askAI(message){
-
-/* --- GROQ --- */
 
 try{
 
-const r=await fetch("https://api.groq.com/openai/v1/chat/completions",{
+const {username,password}=req.body;
 
-method:"POST",
+const user = await db.collection("users").findOne({username});
 
-headers:{
-Authorization:`Bearer ${process.env.GROQ_API_KEY}`,
-"Content-Type":"application/json"
-},
+if(!user){
 
-body:JSON.stringify({
-model:"llama3-70b-8192",
-messages:[{role:"user",content:message}]
-})
+return res.json({status:"user not found"});
+
+}
+
+const ok = await bcrypt.compare(password,user.password);
+
+if(!ok){
+
+return res.json({status:"wrong password"});
+
+}
+
+res.json({status:"success"});
+
+}catch(err){
+
+res.json({status:"error"});
+
+}
 
 });
 
-const data=await r.json();
 
-if(data.choices){
-return data.choices[0].message.content;
-}
 
-}catch(e){}
-
-/* --- GEMINI --- */
-
-try{
-
-const r=await fetch(
-`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
-{
-method:"POST",
-headers:{'Content-Type':'application/json'},
-body:JSON.stringify({
-contents:[{parts:[{text:message}]}]
-})
-});
-
-const data=await r.json();
-
-if(data.candidates){
-return data.candidates[0].content.parts[0].text;
-}
-
-}catch(e){}
-
-/* --- OPENAI --- */
-
-try{
-
-const r=await fetch("https://api.openai.com/v1/chat/completions",{
-
-method:"POST",
-
-headers:{
-Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,
-"Content-Type":"application/json"
-},
-
-body:JSON.stringify({
-model:"gpt-4o-mini",
-messages:[{role:"user",content:message}]
-})
-
-});
-
-const data=await r.json();
-
-if(data.choices){
-return data.choices[0].message.content;
-}
-
-}catch(e){}
-
-return "I could not generate response.";
-
-}
-
-/* ===== Chat ===== */
+/* AI CHAT */
 
 app.post("/chat", async(req,res)=>{
 
-const {message,username}=req.body;
+try{
 
-const reply=await askAI(message);
+const message=req.body.message;
 
-const emotion=await detectEmotion(reply);
+let reply="I could not generate response.";
 
-await Memory.create({
-username,
-message,
-reply
+
+
+/* GEMINI */
+
+try{
+
+if(process.env.GEMINI_API_KEY){
+
+const r = await fetch(
+
+`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+
+{
+
+method:"POST",
+
+headers:{
+
+"Content-Type":"application/json"
+
+},
+
+body:JSON.stringify({
+
+contents:[{parts:[{text:message}]}]
+
+})
+
+}
+
+);
+
+const data=await r.json();
+
+reply=data.candidates?.[0]?.content?.parts?.[0]?.text || reply;
+
+}
+
+}catch(e){}
+
+
+
+/* GROQ */
+
+try{
+
+if(reply==="I could not generate response." && process.env.GROQ_API_KEY){
+
+const r = await fetch(
+
+"https://api.groq.com/openai/v1/chat/completions",
+
+{
+
+method:"POST",
+
+headers:{
+
+Authorization:`Bearer ${process.env.GROQ_API_KEY}`,
+
+"Content-Type":"application/json"
+
+},
+
+body:JSON.stringify({
+
+model:"llama3-70b-8192",
+
+messages:[{role:"user",content:message}]
+
+})
+
+}
+
+);
+
+const data=await r.json();
+
+reply=data.choices?.[0]?.message?.content || reply;
+
+}
+
+}catch(e){}
+
+
+
+/* OPENAI */
+
+try{
+
+if(reply==="I could not generate response." && process.env.OPENAI_API_KEY){
+
+const r = await fetch(
+
+"https://api.openai.com/v1/chat/completions",
+
+{
+
+method:"POST",
+
+headers:{
+
+Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,
+
+"Content-Type":"application/json"
+
+},
+
+body:JSON.stringify({
+
+model:"gpt-4o-mini",
+
+messages:[{role:"user",content:message}]
+
+})
+
+}
+
+);
+
+const data=await r.json();
+
+reply=data.choices?.[0]?.message?.content || reply;
+
+}
+
+}catch(e){}
+
+
+
+/* SAVE MEMORY */
+
+await db.collection("chat").insertOne({
+
+user:message,
+
+ai:reply,
+
+time:new Date()
+
 });
 
-res.json({
-reply,
-emotion
-});
+
+
+res.json({reply});
+
+
+
+}catch(err){
+
+res.json({reply:"Server error occurred."});
+
+}
 
 });
 
-/* ===== Start ===== */
 
-const PORT=process.env.PORT || 3000;
 
-app.listen(PORT,()=>console.log("Smarty AI server running"));
+app.get("/",(req,res)=>{
+
+res.send("Smarty backend running");
+
+});
+
+
+
+app.listen(PORT,()=>{
+
+console.log("Server started");
+
+});
