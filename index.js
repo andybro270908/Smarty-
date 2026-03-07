@@ -1,40 +1,49 @@
 import express from "express";
 import cors from "cors";
-import bcrypt from "bcrypt";
 import fetch from "node-fetch";
+import bcrypt from "bcrypt";
 import { MongoClient } from "mongodb";
+import path from "path";
 
 const app = express();
 
 app.use(express.json());
-app.use(cors());
+
+app.use(cors({
+origin:"*"
+}));
+
+/* ---------- STATIC FILES ---------- */
+
+app.use(express.static("public"));
+
+/* ---------- PORT ---------- */
 
 const PORT = process.env.PORT || 3000;
 
-/* ---------------- MONGODB ---------------- */
+/* ---------- MONGODB ---------- */
 
 const uri = process.env.MONGO_URI;
-const client = new MongoClient(uri);
 
 let db;
 
+const client = new MongoClient(uri);
+
 async function connectDB(){
-  await client.connect();
-  db = client.db("smarty");
-  console.log("MongoDB connected");
+
+await client.connect();
+
+db = client.db("smarty");
+
+console.log("MongoDB connected");
+
 }
 
 connectDB();
 
-/* ---------------- WEBSITE PAGE ---------------- */
+/* ---------- REGISTER ---------- */
 
-app.get("/", (req,res)=>{
-  res.sendFile(process.cwd() + "/index.html");
-});
-
-/* ---------------- REGISTER ---------------- */
-
-app.post("/register", async(req,res)=>{
+app.post("/register",async(req,res)=>{
 
 const {username,password}=req.body;
 
@@ -55,9 +64,9 @@ res.json({status:"registered"});
 
 });
 
-/* ---------------- LOGIN ---------------- */
+/* ---------- LOGIN ---------- */
 
-app.post("/login", async(req,res)=>{
+app.post("/login",async(req,res)=>{
 
 const {username,password}=req.body;
 
@@ -77,13 +86,13 @@ res.json({status:"success"});
 
 });
 
-/* ---------------- CHAT ---------------- */
+/* ---------- CHAT ---------- */
 
-app.post("/chat", async(req,res)=>{
+app.post("/chat",async(req,res)=>{
 
-const message = req.body.message;
+const message=req.body.message;
 
-let reply="I could not generate response";
+let reply="AI could not respond";
 
 /* GROQ */
 
@@ -104,7 +113,7 @@ messages:[{role:"user",content:message}]
 }
 );
 
-const data = await r.json();
+const data=await r.json();
 
 reply=data.choices?.[0]?.message?.content || reply;
 
@@ -112,7 +121,7 @@ reply=data.choices?.[0]?.message?.content || reply;
 
 /* GEMINI */
 
-if(reply==="I could not generate response"){
+if(reply==="AI could not respond"){
 
 try{
 
@@ -120,14 +129,18 @@ const r = await fetch(
 `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
 {
 method:"POST",
-headers:{"Content-Type":"application/json"},
+headers:{
+"Content-Type":"application/json"
+},
 body:JSON.stringify({
-contents:[{parts:[{text:message}]}]
+contents:[
+{parts:[{text:message}]}
+]
 })
 }
 );
 
-const data = await r.json();
+const data=await r.json();
 
 reply=data.candidates?.[0]?.content?.parts?.[0]?.text || reply;
 
@@ -139,8 +152,18 @@ res.json({reply});
 
 });
 
-/* ---------------- SERVER ---------------- */
+/* ---------- HEALTH ---------- */
+
+app.get("/health",(req,res)=>{
+
+res.json({status:"server running"});
+
+});
+
+/* ---------- SERVER ---------- */
 
 app.listen(PORT,()=>{
+
 console.log("Server running on port "+PORT);
+
 });
