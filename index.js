@@ -1,102 +1,45 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
-import bcrypt from "bcrypt";
-import { MongoClient } from "mongodb";
-import path from "path";
 
 const app = express();
 
 app.use(express.json());
-
-app.use(cors({
-origin:"*"
-}));
-
-/* ---------- STATIC FILES ---------- */
-
-app.use(express.static("public"));
-
-/* ---------- PORT ---------- */
+app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
-/* ---------- MONGODB ---------- */
+/* session memory */
 
-const uri = process.env.MONGO_URI;
+const memory = {};
 
-let db;
+/* root */
 
-const client = new MongoClient(uri);
-
-async function connectDB(){
-
-await client.connect();
-
-db = client.db("smarty");
-
-console.log("MongoDB connected");
-
-}
-
-connectDB();
-
-/* ---------- REGISTER ---------- */
-
-app.post("/register",async(req,res)=>{
-
-const {username,password}=req.body;
-
-const exist = await db.collection("users").findOne({username});
-
-if(exist){
-return res.json({status:"user exists"});
-}
-
-const hash = await bcrypt.hash(password,10);
-
-await db.collection("users").insertOne({
-username,
-password:hash
+app.get("/", (req,res)=>{
+res.send("Smarty AI backend running");
 });
 
-res.json({status:"registered"});
+/* chat endpoint */
 
-});
+app.post("/chat", async (req,res)=>{
 
-/* ---------- LOGIN ---------- */
+const {message,session} = req.body;
 
-app.post("/login",async(req,res)=>{
+let history = memory[session] || [];
 
-const {username,password}=req.body;
+history.push({role:"user",content:message});
 
-const user = await db.collection("users").findOne({username});
+let reply = "AI could not generate response.";
 
-if(!user){
-return res.json({status:"user not found"});
-}
+const messages = [
+...history.slice(-6)
+];
 
-const ok = await bcrypt.compare(password,user.password);
-
-if(!ok){
-return res.json({status:"wrong password"});
-}
-
-res.json({status:"success"});
-
-});
-
-/* ---------- CHAT ---------- */
-
-app.post("/chat",async(req,res)=>{
-
-const message=req.body.message;
-
-let reply="AI could not respond";
-
-/* GROQ */
+/* GROQ (UPDATED MODEL) */
 
 try{
+
+if(process.env.GROQ_API_KEY){
 
 const r = await fetch(
 "https://api.groq.com/openai/v1/chat/completions",
@@ -107,21 +50,23 @@ Authorization:`Bearer ${process.env.GROQ_API_KEY}`,
 "Content-Type":"application/json"
 },
 body:JSON.stringify({
-model:"llama3-70b-8192",
-messages:[{role:"user",content:message}]
+model:"gpt-oss-120b",
+messages
 })
 }
 );
 
-const data=await r.json();
+const data = await r.json();
 
-reply=data.choices?.[0]?.message?.content || reply;
+reply = data.choices?.[0]?.message?.content || reply;
+
+}
 
 }catch(e){}
 
-/* GEMINI */
+/* GEMINI fallback */
 
-if(reply==="AI could not respond"){
+if(reply==="AI could not generate response."){
 
 try{
 
@@ -133,37 +78,86 @@ headers:{
 "Content-Type":"application/json"
 },
 body:JSON.stringify({
-contents:[
-{parts:[{text:message}]}
-]
+contents:[{parts:[{text:message}]}]
 })
 }
 );
 
-const data=await r.json();
+const data = await r.json();
 
-reply=data.candidates?.[0]?.content?.parts?.[0]?.text || reply;
+reply = data.candidates?.[0]?.content?.parts?.[0]?.text || reply;
 
 }catch(e){}
 
 }
 
+/* OPENAI fallback */
+
+if(reply==="AI could not generate response."){
+
+try{
+
+const r = await fetch(
+"https://api.openai.com/v1/chat/completions",
+{
+method:"POST",
+headers:{
+Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,
+"Content-Type":"application/json"
+},
+body:JSON.stringify({
+model:"gpt-4o-mini",
+messages
+})
+}
+);
+
+const data = await r.json();
+
+reply = data.choices?.[0]?.message?.content || reply;
+
+}catch(e){}
+
+}
+
+/* HUGGINGFACE fallback */
+
+if(reply==="AI could not generate response."){
+
+try{
+
+const r = await fetch(
+"https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+{
+method:"POST",
+headers:{
+Authorization:`Bearer ${process.env.HF_API_KEY}`,
+"Content-Type":"application/json"
+},
+body:JSON.stringify({inputs:message})
+}
+);
+
+const data = await r.json();
+
+reply = data?.[0]?.generated_text || reply;
+
+}catch(e){}
+
+}
+
+/* update memory */
+
+history.push({role:"assistant",content:reply});
+
+memory[session] = history.slice(-10);
+
 res.json({reply});
 
 });
 
-/* ---------- HEALTH ---------- */
-
-app.get("/health",(req,res)=>{
-
-res.json({status:"server running"});
-
-});
-
-/* ---------- SERVER ---------- */
+/* start server */
 
 app.listen(PORT,()=>{
-
 console.log("Server running on port "+PORT);
-
 });
